@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gemini's Advanced Web Engine</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #000;
+        }
+        canvas {
+            display: block;
+        }
+        #blocker {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.8);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            z-index: 1000;
+        }
+        #instructions {
+            width: 60%;
+            max-width: 500px;
+            text-align: center;
+            cursor: pointer;
+            padding: 25px;
+            border: 2px solid #00ffff;
+            border-radius: 10px;
+            background: rgba(0, 20, 30, 0.8);
+            box-shadow: 0 0 25px rgba(0, 255, 255, 0.5);
+        }
+        #instructions h1 {
+            font-size: 3em;
+            margin-top: 0;
+            color: #00ffff;
+            text-shadow: 0 0 10px #00ffff;
+        }
+        #instructions p {
+            font-size: 1.1em;
+            line-height: 1.6;
+        }
+        .hud {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+            z-index: 999;
+        }
+        .crosshair {
+            width: 4px;
+            height: 4px;
+            background-color: rgba(0, 255, 255, 0.7);
+            border-radius: 50%;
+            box-shadow: 0 0 5px rgba(0, 255, 255, 1);
+        }
+        #player-hud {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 1001;
+            color: white;
+            font-size: 1.2em;
+            text-shadow: 0 0 5px black;
+        }
+        .health-bar-container {
+            width: 200px;
+            height: 20px;
+            background-color: rgba(255, 255, 255, 0.2);
+            border-radius: 5px;
+            border: 1px solid #fff;
+            overflow: hidden;
+            box-shadow: 0 0 10px rgba(255, 255, 255, 0.3);
+            margin-top: 5px;
+        }
+        .health-bar {
+            height: 100%;
+            background-color: #00ff00;
+            transition: width 0.3s ease-in-out;
+            border-radius: 5px;
+        }
+        .enemy-health-bar {
+            position: absolute;
+            width: 50px;
+            height: 5px;
+            background-color: rgba(0, 0, 0, 0.5);
+            border: 1px solid white;
+            z-index: 100;
+        }
+        .enemy-health-bar .bar {
+            height: 100%;
+            background-color: #ff0000;
+            transition: width 0.3s ease-in-out;
+        }
+        #mode-display {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            color: #00ffff;
+            font-size: 1.5em;
+            text-shadow: 0 0 10px #00ffff;
+        }
+    </style>
+</head>
+<body>
+    <div id="blocker">
+        <div id="instructions">
+            <h1>GEMINI ENGINE</h1>
+            <p><b>CLICK TO START</b></p>
+            <p>
+                <b>WASD</b>: Walk<br>
+                <b>SPACE</b>: Jump<br>
+                <b>MOUSE</b>: Look<br>
+                <b>CLICK</b>: Fire Orb<br>
+                <b>SHIFT</b>: Toggle Fire Mode<br>
+                <b>ESC</b>: Release Mouse
+            </p>
+        </div>
+    </div>
+    <div id="player-hud">
+        <p>Health</p>
+        <div class="health-bar-container">
+            <div id="player-health-bar" class="health-bar"></div>
+        </div>
+    </div>
+    <div id="mode-display">
+        Fire Mode: <span id="current-mode">Force</span>
+    </div>
+    <div class="hud">
+        <div class="crosshair"></div>
+    </div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.158.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.158.0/examples/jsm/",
+            "cannon-es": "https://unpkg.com/cannon-es@0.20.0/dist/cannon-es.js"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import * as CANNON from 'cannon-es';
+        import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+        import { SSAOPass } from 'three/addons/postprocessing/SSAOPass.js';
+
+        // Core components
+        let scene, camera, renderer, controls, composer;
+        const clock = new THREE.Clock();
+        
+        // Physics
+        let physicsWorld;
+        let playerBody;
+        const physicsObjects = []; // To sync physics bodies with three.js meshes
+        const mobs = []; // Store mobs for AI and interaction
+
+        // Player state
+        const keys = {};
+        const playerVelocity = new THREE.Vector3();
+        const playerDirection = new THREE.Vector3();
+        const playerSpeed = 80;
+        let canJump = false;
+        const playerState = {
+            health: 100,
+        };
+        const PLAYER_HEALTH_BAR = document.getElementById('player-health-bar');
+        const MODE_DISPLAY = document.getElementById('current-mode');
+        
+        // Firing modes
+        let fireMode = 'force'; // 'force' or 'railgun'
+        const FIRE_MODES = {
+            force: { speed: 40, damage: 25, color: 0x9900ff, emissive: 0x660099, emissiveIntensity: 20 },
+            railgun: { speed: 180, damage: 50, color: 0x00ffff, emissive: 0x0044ff, emissiveIntensity: 30 }
+        };
+
+        init();
+        animate();
+
+        function init() {
+            // --- Scene and Renderer Setup ---
+            scene = new THREE.Scene();
+            renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            renderer.toneMapping = THREE.ACESFilmicToneMapping;
+            renderer.toneMappingExposure = 1.25;
+            document.body.appendChild(renderer.domElement);
+
+            // --- Camera ---
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            
+            // --- Physics World ---
+            physicsWorld = new CANNON.World({ gravity: new CANNON.Vec3(0, -20, 0) });
+
+            // --- Lighting and Environment ---
+            setupLighting();
+            setupEnvironment();
+
+            // --- Player Controller ---
+            setupPlayerController();
+
+            // --- Post-Processing ---
+            setupPostProcessing();
+
+            // --- Event Listeners ---
+            setupEventListeners();
+        }
+
+        function setupLighting() {
+            scene.fog = new THREE.FogExp2(0x1d242f, 0.003);
+            
+            const ambient = new THREE.HemisphereLight(0xeeeeff, 0x777788, 1.2);
+            scene.add(ambient);
+
+            const dirLight = new THREE.DirectionalLight(0xffefd5, 2.0);
+            dirLight.position.set(15, 30, 10);
+            dirLight.castShadow = true;
+            dirLight.shadow.camera.top = 50;
+            dirLight.shadow.camera.bottom = -50;
+            dirLight.shadow.camera.left = -50;
+            dirLight.shadow.camera.right = 50;
+            dirLight.shadow.mapSize.width = 4096;
+            dirLight.shadow.mapSize.height = 4096;
+            scene.add(dirLight);
+        }
+
+        function setupEnvironment() {
+            // Skybox
+            const textureLoader = new THREE.CubeTextureLoader();
+            const skyboxTextures = [
+                'https://threejs.org/examples/textures/cube/Bridge2/posx.jpg',
+                'https://threejs.org/examples/textures/cube/Bridge2/negx.jpg',
+                'https://threejs.org/examples/textures/cube/Bridge2/posy.jpg',
+                'https://threejs.org/examples/textures/cube/Bridge2/negy.jpg',
+                'https://threejs.org/examples/textures/cube/Bridge2/posz.jpg',
+                'https://threejs.org/examples/textures/cube/Bridge2/negz.jpg'
+            ];
+            const skybox = textureLoader.load(skyboxTextures);
+            scene.background = skybox;
+
+            // Ground
+            const groundMaterial = new THREE.MeshStandardMaterial({
+                color: 0x333333,
+                metalness: 0.9,
+                roughness: 0.3,
+            });
+            const groundMesh = new THREE.Mesh(new THREE.PlaneGeometry(500, 500), groundMaterial);
+            groundMesh.rotation.x = -Math.PI / 2;
+            groundMesh.receiveShadow = true;
+            scene.add(groundMesh);
+
+            const groundBody = new CANNON.Body({
+                type: CANNON.Body.STATIC,
+                shape: new CANNON.Plane(),
+            });
+            groundBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
+            physicsWorld.addBody(groundBody);
+
+            // Terrain and obstacles
+            const obstacleMat = new THREE.MeshStandardMaterial({ color: 0x888888, metalness: 0.5, roughness: 0.8 });
+            
+            // Floating platforms
+            createFloatingPlatform(20, 1, 20, 0, 5, -30);
+            createFloatingPlatform(10, 1, 10, -30, 10, 20);
+            createFloatingPlatform(30, 1, 15, 40, 15, 0);
+
+            // Dynamic boxes
+            const boxGeo = new THREE.BoxGeometry(2, 2, 2);
+            for (let i = 0; i < 30; i++) {
+                const boxMat = new THREE.MeshStandardMaterial({ color: Math.random() * 0xffffff, metalness: 0.5, roughness: 0.5 });
+                const boxMesh = new THREE.Mesh(boxGeo, boxMat);
+                boxMesh.castShadow = true;
+                boxMesh.receiveShadow = true;
+                
+                const boxBody = new CANNON.Body({
+                    mass: 5,
+                    shape: new CANNON.Box(new CANNON.Vec3(1, 1, 1)),
+                    position: new CANNON.Vec3((Math.random() - 0.5) * 60, 5 + i * 2.5, (Math.random() - 0.5) * 60),
+                });
+                scene.add(boxMesh);
+                physicsWorld.addBody(boxBody);
+                physicsObjects.push({ mesh: boxMesh, body: boxBody });
+            }
+            
+            // Spawn mobs
+            for (let i = 0; i < 15; i++) {
+                createMob();
+            }
+        }
+        
+        function createFloatingPlatform(width, height, depth, x, y, z) {
+            const platformGeo = new THREE.BoxGeometry(width, height, depth);
+            const platformMat = new THREE.MeshStandardMaterial({ color: 0x444444, metalness: 0.9, roughness: 0.5 });
+            const platformMesh = new THREE.Mesh(platformGeo, platformMat);
+            platformMesh.position.set(x, y, z);
+            platformMesh.castShadow = true;
+            platformMesh.receiveShadow = true;
+            scene.add(platformMesh);
+
+            const platformBody = new CANNON.Body({
+                type: CANNON.Body.STATIC,
+                shape: new CANNON.Box(new CANNON.Vec3(width / 2, height / 2, depth / 2)),
+                position: new CANNON.Vec3(x, y, z),
+            });
+            physicsWorld.addBody(platformBody);
+        }
+
+        function createMob() {
+            const mobGeo = new THREE.IcosahedronGeometry(0.8, 0);
+            const mobMat = new THREE.MeshStandardMaterial({ color: 0xff0000, roughness: 0.2, metalness: 0.3 });
+            const mobMesh = new THREE.Mesh(mobGeo, mobMat);
+            mobMesh.castShadow = true;
+            mobMesh.receiveShadow = true;
+
+            const mobBody = new CANNON.Body({
+                mass: 20,
+                shape: new CANNON.Sphere(0.8),
+                position: new CANNON.Vec3((Math.random() - 0.5) * 80, 5, (Math.random() - 0.5) * 80),
+                linearDamping: 0.9
+            });
+            mobBody.isMob = true;
+            mobBody.health = 100;
+
+            const healthBar = document.createElement('div');
+            healthBar.className = 'enemy-health-bar';
+            const healthBarInner = document.createElement('div');
+            healthBarInner.className = 'bar';
+            healthBar.appendChild(healthBarInner);
+            document.body.appendChild(healthBar);
+            mobBody.healthBar = healthBar;
+
+            scene.add(mobMesh);
+            physicsWorld.addBody(mobBody);
+            const mobObject = { mesh: mobMesh, body: mobBody };
+            physicsObjects.push(mobObject);
+            mobs.push(mobObject);
+        }
+
+        function updatePlayerHealth(damage) {
+            playerState.health -= damage;
+            if (playerState.health < 0) playerState.health = 0;
+            PLAYER_HEALTH_BAR.style.width = `${playerState.health}%`;
+        }
+
+        function setupPlayerController() {
+            controls = new PointerLockControls(camera, renderer.domElement);
+            
+            const blocker = document.getElementById('blocker');
+            blocker.addEventListener('click', () => controls.lock());
+
+            controls.addEventListener('lock', () => {
+                blocker.style.display = 'none';
+            });
+            controls.addEventListener('unlock', () => {
+                blocker.style.display = 'flex';
+            });
+
+            const playerShape = new CANNON.Sphere(0.8);
+            playerBody = new CANNON.Body({ mass: 10, shape: playerShape });
+            playerBody.position.set(0, 5, 0);
+            playerBody.isPlayer = true;
+            physicsWorld.addBody(playerBody);
+            
+            playerBody.addEventListener('collide', (event) => {
+                const contactNormal = new CANNON.Vec3();
+                if (event.contact.bi.id === playerBody.id) {
+                    event.contact.ni.negate(contactNormal);
+                } else {
+                    contactNormal.copy(event.contact.ni);
+                }
+                if (contactNormal.y > 0.5) {
+                    canJump = true;
+                }
+            });
+        }
+
+        function setupPostProcessing() {
+            composer = new EffectComposer(renderer);
+            const renderPass = new RenderPass(scene, camera);
+            composer.addPass(renderPass);
+
+            const ssaoPass = new SSAOPass(scene, camera, window.innerWidth, window.innerHeight);
+            ssaoPass.kernelRadius = 12;
+            ssaoPass.minDistance = 0.005;
+            ssaoPass.maxDistance = 0.1;
+            composer.addPass(ssaoPass);
+            
+            const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.6, 0.5, 0.2);
+            composer.addPass(bloomPass);
+        }
+
+        function setupEventListeners() {
+            document.addEventListener('keydown', (e) => {
+                keys[e.code] = true;
+                if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
+                    fireMode = fireMode === 'force' ? 'railgun' : 'force';
+                    MODE_DISPLAY.textContent = fireMode.charAt(0).toUpperCase() + fireMode.slice(1);
+                }
+            });
+            document.addEventListener('keyup', (e) => keys[e.code] = false);
+            document.addEventListener('mousedown', onMouseDown);
+            window.addEventListener('resize', onWindowResize);
+            physicsWorld.addEventListener('beginContact', onContact);
+        }
+
+        function onContact(event) {
+            const { bodyA, bodyB } = event;
+            const isOrbOnA = bodyA.isOrb;
+            const isOrbOnB = bodyB.isOrb;
+            const isMobOnA = bodyA.isMob;
+            const isMobOnB = bodyB.isMob;
+
+            // Orb hits Mob
+            if ((isOrbOnA && isMobOnB) || (isOrbOnB && isMobOnA)) {
+                const mobBody = isMobOnA ? bodyA : bodyB;
+                const orbBody = isOrbOnA ? bodyA : bodyB;
+                const damage = orbBody.damage;
+
+                // Find and damage the mob
+                const mobIndex = mobs.findIndex(m => m.body.id === mobBody.id);
+                if (mobIndex > -1) {
+                    const mobToDamage = mobs[mobIndex];
+                    mobToDamage.body.health -= damage;
+                    mobToDamage.body.healthBar.children[0].style.width = `${mobToDamage.body.health}%`;
+                    if (mobToDamage.body.health <= 0) {
+                        scene.remove(mobToDamage.mesh);
+                        physicsWorld.removeBody(mobToDamage.body);
+                        mobToDamage.body.healthBar.remove();
+                        mobs.splice(mobIndex, 1);
+                        const physicsIndex = physicsObjects.findIndex(p => p.body.id === mobBody.id);
+                        if(physicsIndex > -1) physicsObjects.splice(physicsIndex, 1);
+                    }
+                }
+                // Destroy the orb
+                destroyOrb(orbBody);
+            }
+        }
+
+        function destroyOrb(orbBody) {
+            const orbPhysicsIndex = physicsObjects.findIndex(p => p.body.id === orbBody.id);
+            if(orbPhysicsIndex > -1) {
+                const orbToDestroy = physicsObjects[orbPhysicsIndex];
+                orbToDestroy.mesh.clear();
+                scene.remove(orbToDestroy.mesh);
+                physicsWorld.removeBody(orbToDestroy.body);
+                physicsObjects.splice(orbPhysicsIndex, 1);
+            }
+        }
+
+        function onMouseDown() {
+            if (!controls.isLocked) return;
+
+            const mode = FIRE_MODES[fireMode];
+            
+            const orbGeo = new THREE.SphereGeometry(0.2, 16, 16);
+            const orbMat = new THREE.MeshStandardMaterial({
+                color: mode.color,
+                emissive: mode.emissive,
+                emissiveIntensity: mode.emissiveIntensity,
+            });
+            const orbMesh = new THREE.Mesh(orbGeo, orbMat);
+            orbMesh.castShadow = true;
+
+            const orbLight = new THREE.PointLight(mode.emissive, mode.emissiveIntensity, 5);
+            orbMesh.add(orbLight);
+            
+            const orbBody = new CANNON.Body({
+                mass: 2,
+                shape: new CANNON.Sphere(0.2),
+            });
+            orbBody.isOrb = true;
+            orbBody.damage = mode.damage;
+            
+            const startPosition = new THREE.Vector3();
+            camera.getWorldPosition(startPosition);
+            camera.getWorldDirection(playerDirection);
+            startPosition.add(playerDirection.multiplyScalar(1.5));
+            
+            orbBody.position.copy(startPosition);
+            orbMesh.position.copy(startPosition);
+            orbBody.velocity.copy(playerDirection.multiplyScalar(mode.speed));
+
+            scene.add(orbMesh);
+            physicsWorld.addBody(orbBody);
+            const orbObject = { mesh: orbMesh, body: orbBody };
+            physicsObjects.push(orbObject);
+
+            setTimeout(() => destroyOrb(orbBody), 5000);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function handlePlayerMovement(delta) {
+            if (!controls.isLocked) return;
+            
+            const inputVelocity = new THREE.Vector3();
+            if (keys['KeyW']) inputVelocity.z = -1;
+            if (keys['KeyS']) inputVelocity.z = 1;
+            if (keys['KeyA']) inputVelocity.x = -1;
+            if (keys['KeyD']) inputVelocity.x = 1;
+
+            camera.getWorldDirection(playerDirection);
+            const right = new THREE.Vector3().crossVectors(camera.up, playerDirection).normalize();
+
+            const moveDirection = new THREE.Vector3()
+                .add(playerDirection.multiplyScalar(-inputVelocity.z))
+                .add(right.multiplyScalar(inputVelocity.x))
+                .normalize();
+
+            const targetVelocityX = moveDirection.x * playerSpeed;
+            const targetVelocityZ = moveDirection.z * playerSpeed;
+
+            const forceX = (targetVelocityX - playerBody.velocity.x) * 10;
+            const forceZ = (targetVelocityZ - playerBody.velocity.z) * 10;
+            playerBody.applyForce(new CANNON.Vec3(forceX, 0, forceZ));
+            
+            if (keys['Space'] && canJump) {
+                playerBody.velocity.y = 12.0;
+                canJump = false;
+            }
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const delta = Math.min(clock.getDelta(), 0.1);
+
+            // Simple mob AI: make them wander and update health bar position
+            for(const mob of mobs) {
+                if(Math.random() > 0.99) {
+                    const force = new CANNON.Vec3(
+                        (Math.random() - 0.5) * 200, 
+                        0, 
+                        (Math.random() - 0.5) * 200
+                    );
+                    mob.body.applyForce(force);
+                }
+
+                // Update health bar position
+                const mobPosition = new THREE.Vector3();
+                mob.mesh.getWorldPosition(mobPosition);
+                const screenPos = mobPosition.clone().project(camera);
+                
+                const x = (screenPos.x * 0.5 + 0.5) * window.innerWidth;
+                const y = (-screenPos.y * 0.5 + 0.5) * window.innerHeight;
+
+                const healthBar = mob.body.healthBar;
+                healthBar.style.left = `${x - 25}px`;
+                healthBar.style.top = `${y - 40}px`;
+                healthBar.style.display = (screenPos.z > 1 || mob.body.health <= 0) ? 'none' : 'block';
+            }
+
+            if(controls.isLocked) {
+                handlePlayerMovement(delta);
+            }
+
+            physicsWorld.step(1 / 60, delta, 3);
+
+            for (const obj of physicsObjects) {
+                obj.mesh.position.copy(obj.body.position);
+                obj.mesh.quaternion.copy(obj.body.quaternion);
+            }
+            
+            camera.position.copy(playerBody.position).add(new THREE.Vector3(0, 0.8, 0));
+
+            composer.render();
+        }
+
+    </script>
+</body>
+</html>
